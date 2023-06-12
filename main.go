@@ -111,7 +111,7 @@ func exec(url string) {
 }
 func main() {
 
-	k = hypervisor.KVMHost{Addr: "canceron"}
+	//k = hypervisor.KVMHost{Addr: "canceron"}
 
 	log.Println("Started the KVM agent")
 
