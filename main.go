@@ -113,7 +113,7 @@ func main() {
 
 	k = hypervisor.KVMHost{Addr: "canceron"}
 
-	log.Println("Started the KVMhost daemon")
+	log.Println("Started the KVM agent")
 
 	url := os.Getenv("TARGET_URL")
 	if url == "" {
