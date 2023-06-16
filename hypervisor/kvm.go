@@ -114,21 +114,19 @@ func (k KVMHost) GetOS() (string, error) {
 }
 
 func (k KVMHost) getLibvirt() (*libvirt.Libvirt, error) {
-	if k.libvirtCon == nil {
 
-		var d socket.Dialer
-		if k.Addr != "" {
-			d = dialers.NewRemote(k.Addr, dialers.UsePort("16509"), dialers.WithRemoteTimeout(time.Second*5))
-		} else {
-			d = dialers.NewLocal()
-		}
-		k.libvirtCon = libvirt.NewWithDialer(d)
-
-		if err := k.libvirtCon.Connect(); err != nil {
-			return nil, err
-		}
-
+	var d socket.Dialer
+	if k.Addr != "" {
+		d = dialers.NewRemote(k.Addr, dialers.UsePort("16509"), dialers.WithRemoteTimeout(time.Second*5))
+	} else {
+		d = dialers.NewLocal()
 	}
+	k.libvirtCon = libvirt.NewWithDialer(d)
+
+	if err := k.libvirtCon.Connect(); err != nil {
+		return nil, err
+	}
+
 	return k.libvirtCon, nil
 }
 
@@ -137,6 +135,7 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer l.Disconnect()
 
 	domains, _, err := l.ConnectListAllDomains(1, 0)
 	if err != nil {
