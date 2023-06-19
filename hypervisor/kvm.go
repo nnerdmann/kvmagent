@@ -217,9 +217,18 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 		// 		log.Fatalf("failed to retrieve domains interfaces: %v", err)
 		// 	}
 		// }
+
+		blacklistInterfaces := []string{"lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr"}
+
+	IFLOOP:
 		for _, i := range interfaces {
 			if string(i.Hwaddr[0]) == "00:00:00:00:00:00" {
 				continue
+			}
+			for _, black := range blacklistInterfaces {
+				if strings.Contains(i.Name, black) {
+					continue IFLOOP
+				}
 			}
 
 			var iface vmif
