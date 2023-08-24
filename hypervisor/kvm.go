@@ -218,7 +218,7 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 		// 	}
 		// }
 
-		blacklistInterfaces := []string{"lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr"}
+		blacklistInterfaces := []string{"lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr", "cni", "nodelocaldns"}
 
 	IFLOOP:
 		for _, i := range interfaces {
@@ -239,10 +239,14 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 				if err != nil {
 					log.Fatalf("Unknown IP address: %v", err)
 				}
-				if addrObj.IsLoopback() || addrObj.IsLinkLocalUnicast() {
+
+				if addrObj.IsLoopback() /*127.0.0.1*/ || addrObj.IsLinkLocalUnicast() /*169.254.x.x*/ || a.Prefix == 32 /*Floating IP*/ {
 					continue
 				}
 				iface.IP = a.Addr
+			}
+			if iface.IP == "" {
+				continue
 			}
 			vmObj.Interfaces = append(vmObj.Interfaces, iface)
 		}

@@ -85,7 +85,7 @@ func TestGetOS(t *testing.T) {
 }
 
 func TestGetVMs(t *testing.T) {
-	k := KVMHost{Addr: "canceron"}
+	k := KVMHost{Addr: "kvm68"}
 	vms, err := k.GetVMs()
 	if err != nil {
 		t.Error(err)
