@@ -218,7 +218,7 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 		// 	}
 		// }
 
-		blacklistInterfaces := []string{"lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr", "cni", "nodelocaldns"}
+		blacklistInterfaces := []string{"lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr", "cni", "nodelocaldns", "docker"}
 
 	IFLOOP:
 		for _, i := range interfaces {
