@@ -1,11 +1,13 @@
 package hypervisor
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -57,6 +59,24 @@ func (k KVMHost) GetMemory() (int, error) {
 
 func (k KVMHost) GetHostname() (string, error) {
 	return os.Hostname()
+}
+
+func (k KVMHost) GetBMCAddress() (string, error) {
+	// HPE
+	_, err := exec.LookPath("hponcfg")
+	if err != nil {
+		return "", nil
+	}
+	stdout, err := exec.Command("bash", "-c", "echo '<RIBCL VERSION=\"2.0\"><LOGIN USER_LOGIN=\"x\" PASSWORD=\"x\"><RIB_INFO MODE=\"read\"><GET_NETWORK_SETTINGS /></RIB_INFO></LOGIN></RIBCL>' | hponcfg -i | grep '<IP_ADDRESS ' | cut -d '\"' -f 2").Output()
+	if err != nil {
+		return "", errors.New("HPONCFG failed with error " + err.Error())
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(string(stdout)))
+	if err != nil {
+		return "", err
+	}
+
+	return addr.String(), nil
 }
 
 func (k KVMHost) GetIPAddress() (string, error) {

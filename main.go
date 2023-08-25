@@ -25,6 +25,7 @@ type hv interface {
 	GetCPU() (string, error)
 	GetCores() (int, error)
 	GetCPUNum() (int, error)
+	GetBMCAddress() (string, error)
 }
 
 type hvInfo struct {
@@ -35,6 +36,7 @@ type hvInfo struct {
 	Cores     int
 	CPUNumber int
 	Memory    int
+	BMC       string
 	VMs       []hypervisor.VM
 }
 
@@ -47,6 +49,10 @@ func getJSON(hvObj hv) (string, error) {
 		return "", err
 	}
 	returnObj.IP, err = hvObj.GetIPAddress()
+	if err != nil {
+		return "", err
+	}
+	returnObj.BMC, err = hvObj.GetBMCAddress()
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +108,7 @@ func exec(url string) {
 		count = 0
 	} else {
 		count++
-		if count > 10 {
+		if count > 1000 {
 			log.Println("JSON data unchanged the last 1000 checks")
 			count = 0
 		}
@@ -111,7 +117,7 @@ func exec(url string) {
 }
 func main() {
 
-	// k = hypervisor.KVMHost{Addr: "peru"}
+	// k = hypervisor.KVMHost{Addr: "chile"}
 	// os.Setenv("CHECK_INTERVAL", "1")
 
 	log.Println("Started the KVM agent")
@@ -128,7 +134,7 @@ func main() {
 
 	interval, err := strconv.Atoi(os.Getenv("CHECK_INTERVAL"))
 	if err != nil || interval < 1 {
-		interval = 60
+		interval = 300
 	}
 
 	log.Printf("Check for changes will be executed every %d seconds", interval)

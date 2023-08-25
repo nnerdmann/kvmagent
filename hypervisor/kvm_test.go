@@ -93,3 +93,13 @@ func TestGetVMs(t *testing.T) {
 		t.Logf("%+v", vms)
 	}
 }
+
+func TestGetBMCAddress(t *testing.T) {
+	k := KVMHost{Addr: "kvm70"}
+	vms, err := k.GetBMCAddress()
+	if err != nil {
+		t.Error(err)
+	} else {
+		t.Logf("%+v", vms)
+	}
+}
