@@ -34,6 +34,7 @@ type VM struct {
 	Snapshot   int
 	UUID       string
 	XML        string
+	Type       string
 	Interfaces []vmif
 }
 
@@ -201,6 +202,19 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 		}
 		vmObj.Snapshot = int(numSnapshots)
 
+		vmObj.Type = "VM"
+		os, err := l.DomainGetGuestInfo(d, uint32(libvirt.DomainGuestInfoOs), 0)
+		if err == nil {
+			for _, field := range os {
+				if field.Field == "os.id" {
+					if field.Value.I == "mswindows" {
+						vmObj.Type = "Windows VM"
+					}
+					break
+				}
+			}
+		}
+
 		vmObj.XML, err = l.DomainGetXMLDesc(d, 2)
 		if err != nil {
 			return nil, err
@@ -242,7 +256,7 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 
 	IFLOOP:
 		for _, i := range interfaces {
-			if string(i.Hwaddr[0]) == "00:00:00:00:00:00" {
+			if len(i.Hwaddr) == 0 || string(i.Hwaddr[0]) == "00:00:00:00:00:00" {
 				continue
 			}
 			for _, black := range blacklistInterfaces {
