@@ -223,27 +223,76 @@ func (k KVMHost) GetVMs() ([]VM, error) {
 		if err != nil {
 			return nil, err
 		}
-		diskTypes, err := xmlquery.QueryAll(xmlObj, "/domain/devices/disk[@device='disk']/driver/@type")
-		if err != nil {
-			return nil, err
-		}
-		diskFiles, err := xmlquery.QueryAll(xmlObj, "/domain/devices/disk[@device='disk']/source/@file")
+
+		disks, err := xmlquery.QueryAll(xmlObj, "/domain/devices/disk[@device='disk']")
 		if err != nil {
 			return nil, err
 		}
 
-		for i := range diskTypes {
+		for _, diskNode := range disks {
 			var diskObj vmdisk
-			diskObj.file = diskFiles[i].FirstChild.Data
-			diskObj.format = diskTypes[i].FirstChild.Data
-			_, size, _, err := l.DomainGetBlockInfo(d, diskObj.file, 0)
-			if err != nil {
-				return nil, err
+
+			// Get the disk type from the driver element
+			driverNode := diskNode.SelectElement("driver")
+			if driverNode == nil {
+				return nil, fmt.Errorf("missing driver element in disk")
+			}
+			diskObj.format = driverNode.SelectAttr("type")
+
+			// Get the source element and handle file or volume based sources
+			sourceNode := diskNode.SelectElement("source")
+			if sourceNode == nil {
+				return nil, fmt.Errorf("missing source element in disk")
 			}
 
-			diskObj.size = int(size)
+			fileAttr := sourceNode.SelectAttr("file")
+			if fileAttr != "" {
+				// Handle file-based disks
+				diskObj.file = fileAttr
+				// Fetch block info based on the file (or volume)
+				_, size, _, err := l.DomainGetBlockInfo(d, diskObj.file, 0)
+				if err != nil {
+					return nil, err
+				}
+
+				// Set disk size and append to vmObj
+				diskObj.size = int(size)
+			} else {
+				// Handle volume-based disks (pool and volume attributes)
+				poolAttr := sourceNode.SelectAttr("pool")
+				volumeAttr := sourceNode.SelectAttr("volume")
+				if poolAttr != "" && volumeAttr != "" {
+					diskObj.file = fmt.Sprintf("%s/%s", poolAttr, volumeAttr)
+					diskObj.size = 0 //TODO Implement StoragePool size
+				} else {
+					return nil, fmt.Errorf("unknown disk source type")
+				}
+			}
+
 			vmObj.Disk = append(vmObj.Disk, diskObj)
 		}
+
+		// diskTypes, err := xmlquery.QueryAll(xmlObj, "/domain/devices/disk[@device='disk']/driver/@type")
+		// if err != nil {
+		// 	return nil, err
+		// }
+		// diskFiles, err := xmlquery.QueryAll(xmlObj, "/domain/devices/disk[@device='disk']/source/@file")
+		// if err != nil {
+		// 	return nil, err
+		// }
+
+		// for i := range diskTypes {
+		// 	var diskObj vmdisk
+		// 	diskObj.file = diskFiles[i].FirstChild.Data
+		// 	diskObj.format = diskTypes[i].FirstChild.Data
+		// 	_, size, _, err := l.DomainGetBlockInfo(d, diskObj.file, 0)
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+
+		// 	diskObj.size = int(size)
+		// 	vmObj.Disk = append(vmObj.Disk, diskObj)
+		// }
 
 		interfaces, _ := l.DomainInterfaceAddresses(d, uint32(libvirt.DomainInterfaceAddressesSrcAgent), 0)
 		// if err != nil {

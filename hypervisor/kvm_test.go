@@ -85,7 +85,7 @@ func TestGetOS(t *testing.T) {
 }
 
 func TestGetVMs(t *testing.T) {
-	k := KVMHost{Addr: "ice.nice.nokia.net"}
+	k := KVMHost{Addr: "kvm63temp.nice.nokia.net"}
 	vms, err := k.GetVMs()
 	if err != nil {
 		t.Error(err)
