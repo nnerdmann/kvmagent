@@ -1,95 +1,171 @@
-import os
 import logging
+import os
+import time
+from typing import Any, Callable, Optional
+
 from pynetbox import api
 from requests import RequestException
 
-NETBOX_URL = os.getenv("NETBOX_URL", None)
+NETBOX_URL = os.getenv("NETBOX_URL")
 NETBOX_TOKEN = os.getenv("NETBOX_TOKEN", "")
 NETBOX_TENANT = os.getenv("NETBOX_TENANT", "default")
 NETBOX_SITE = os.getenv("NETBOX_SITE", "default")
+NETBOX_CLUSTER_TYPE = os.getenv("NETBOX_CLUSTER_TYPE", "KVM")
+NETBOX_API_RETRIES = int(os.getenv("NETBOX_API_RETRIES", "3"))
+NETBOX_RETRY_BACKOFF = float(os.getenv("NETBOX_RETRY_BACKOFF", "1.5"))
 
-nb = api(NETBOX_URL, token=NETBOX_TOKEN)
+LOGGER = logging.getLogger(__name__)
+nb = api(NETBOX_URL, token=NETBOX_TOKEN) if NETBOX_URL else None
 
 
-def get_cluster_type_by_name(name):
-    """
-    Retrieve a cluster from Netbox by its name.
-    Returns the cluster object if found, None otherwise.
-    """
+class NetBoxUnavailableError(RuntimeError):
+    """Raised when NetBox is not configured or cannot be reached."""
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Best-effort check for transient connectivity/server-side failures."""
+    text = str(exc).lower()
+    retryable_markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "name or service not known",
+        "bad gateway",
+        "gateway timeout",
+        "too many requests",
+        "service unavailable",
+    )
+    return any(marker in text for marker in retryable_markers)
+
+
+def _netbox_call(action: str, func: Callable[[], Any]) -> Any:
+    """Run a NetBox API call with retries and structured logs."""
+    if nb is None:
+        raise NetBoxUnavailableError("NETBOX_URL is not set; NetBox client is not initialized")
+
+    max_tries = max(1, NETBOX_API_RETRIES)
+    for attempt in range(1, max_tries + 1):
+        try:
+            result = func()
+            if attempt > 1:
+                LOGGER.info("NetBox call recovered: action=%s attempt=%d", action, attempt)
+            return result
+        except (RequestException, ValueError) as exc:
+            is_retryable = _is_retryable_error(exc)
+            is_last_attempt = attempt == max_tries
+
+            if not is_retryable or is_last_attempt:
+                LOGGER.error(
+                    "NetBox call failed: action=%s attempt=%d/%d retryable=%s error=%s",
+                    action,
+                    attempt,
+                    max_tries,
+                    is_retryable,
+                    exc,
+                )
+                raise
+
+            sleep_for = NETBOX_RETRY_BACKOFF * (2 ** (attempt - 1))
+            LOGGER.warning(
+                "NetBox call retrying: action=%s attempt=%d/%d sleep=%.1fs error=%s",
+                action,
+                attempt,
+                max_tries,
+                sleep_for,
+                exc,
+            )
+            time.sleep(sleep_for)
+
+
+def get_cluster_type_by_name(name: str) -> Optional[Any]:
+    """Return cluster type object from NetBox by name."""
     try:
-        cluster_type = nb.virtualization.cluster_types.get(name=name)
-        return cluster_type
-    except (RequestException, ValueError) as e:
-        logging.error("Error retrieving cluster '%s' from Netbox: %s", name, e)
+        return _netbox_call(
+            action=f"cluster_type.get:{name}",
+            func=lambda: nb.virtualization.cluster_types.get(name=name),
+        )
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Unable to retrieve cluster type '%s': %s", name, exc)
         return None
 
-def create_or_update_cluster_in_netbox(name):
-    """
-    Create or update a cluster in Netbox using the pynetbox API.
-    Expects a Cluster object as defined in kvm.py.
-    """
+
+def create_or_update_cluster_in_netbox(name: str) -> Optional[Any]:
+    """Create or update a NetBox cluster and bind host device to it when available."""
+    cluster_type = get_cluster_type_by_name(NETBOX_CLUSTER_TYPE)
+    if cluster_type is None:
+        LOGGER.error("Cluster type '%s' does not exist or is unreachable in NetBox.", NETBOX_CLUSTER_TYPE)
+        return None
+
     payload = {
         "name": name,
-        "type": {"name": get_cluster_type_by_name("KVM").name},  # Assuming 'KVM' is a valid type in Netbox
+        "type": {"name": cluster_type.name},
         "status": "active",
         "tenant": {"name": NETBOX_TENANT},
         "site": {"name": NETBOX_SITE},
     }
+
     try:
-        # Check if cluster already exists
-        cluster = nb.virtualization.clusters.get(name=name)
+        cluster = _netbox_call(
+            action=f"clusters.get:{name}",
+            func=lambda: nb.virtualization.clusters.get(name=name),
+        )
+
         if cluster:
-            logging.debug("Cluster '%s' exists in Netbox, checking for updates.", name)
+            LOGGER.debug("Cluster '%s' found in NetBox.", name)
             if needs_update(payload, cluster):
-                logging.debug("Cluster '%s' needs update in Netbox.", name)
-                updated = nb.virtualization.clusters.update([{
-                    "id": cluster.id,
-                    **payload
-                }])
-                if updated:
-                    logging.info("Cluster '%s' updated in Netbox.", name)
-                else:
-                    logging.error("Failed to update cluster '%s' in Netbox.", name)
+                updated = _netbox_call(
+                    action=f"clusters.update:{name}",
+                    func=lambda: nb.virtualization.clusters.update([{"id": cluster.id, **payload}]),
+                )
+                if not updated:
+                    LOGGER.error("Cluster '%s' update returned empty response.", name)
                     return None
+                LOGGER.info("Cluster '%s' updated.", name)
             else:
-                logging.debug("Cluster '%s' is up to date in Netbox.", name)
+                LOGGER.debug("Cluster '%s' already up to date.", name)
         else:
-            cluster = nb.virtualization.clusters.create(payload)
-            if cluster:
-                logging.info("Cluster '%s' created in Netbox.", name)
-            else:
-                logging.error("Failed to create cluster '%s' in Netbox.", name)
+            cluster = _netbox_call(
+                action=f"clusters.create:{name}",
+                func=lambda: nb.virtualization.clusters.create(payload),
+            )
+            if not cluster:
+                LOGGER.error("Cluster '%s' creation returned empty response.", name)
                 return None
-    except (RequestException, ValueError) as e:
-        logging.error("Error creating or updating cluster '%s' in Netbox: %s", name, e)
+            LOGGER.info("Cluster '%s' created.", name)
+
+        _assign_device_to_cluster(name, cluster)
+        return cluster
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Failed to create/update cluster '%s': %s", name, exc)
         return None
 
+
+def _assign_device_to_cluster(name: str, cluster: Any) -> None:
+    """Assign dcim device to cluster if matching device name exists."""
     try:
-        existing_device = nb.dcim.devices.get(name=name)
-        if existing_device:
-            logging.debug("Device '%s' found in Netbox.", name)
-            # Check if device is already assigned to this cluster
-            if existing_device.cluster and existing_device.cluster.id == cluster.id:
-                logging.debug("Device '%s' is already assigned to cluster '%s'.", name, name)
-            else:
-                # Assign device to cluster
-                existing_device.cluster = cluster.id
-                existing_device.save()
-                logging.info("Device '%s' assigned to cluster '%s'.", name, name)
-        else:
-            logging.warning("No device found with name '%s'.", name)
-            
-    except (RequestException, ValueError) as e:
-        logging.error("Error assigning device to cluster '%s' in Netbox: %s", name, e)
-        return None
+        existing_device = _netbox_call(
+            action=f"devices.get:{name}",
+            func=lambda: nb.dcim.devices.get(name=name),
+        )
+        if not existing_device:
+            LOGGER.warning("No NetBox device found for host '%s'; skipping cluster assignment.", name)
+            return
 
-    return cluster
-    
-def create_or_update_vm_in_netbox(vm,cluster):
-    """
-    Create or update a VM in Netbox using the pynetbox API.
-    Expects a VM object as defined in kvm.py.
-    """
+        if existing_device.cluster and existing_device.cluster.id == cluster.id:
+            LOGGER.debug("Device '%s' already bound to cluster '%s'.", name, cluster.name)
+            return
+
+        existing_device.cluster = cluster.id
+        _netbox_call(action=f"devices.save:{name}", func=existing_device.save)
+        LOGGER.info("Device '%s' assigned to cluster '%s'.", name, cluster.name)
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Unable to assign device '%s' to cluster '%s': %s", name, cluster.name, exc)
+
+
+def create_or_update_vm_in_netbox(vm: Any, cluster: Any) -> Optional[Any]:
+    """Create or update a VM in NetBox."""
     payload = {
         "name": vm.name,
         "status": vm.status.lower(),
@@ -100,129 +176,151 @@ def create_or_update_vm_in_netbox(vm,cluster):
         "tenant": {"name": NETBOX_TENANT},
         "cluster": {"name": cluster.name},
     }
+
     try:
-        # Check if VM already exists
-        existing = nb.virtualization.virtual_machines.get(name=vm.name)       
+        existing = _netbox_call(
+            action=f"virtual_machines.get:{vm.name}",
+            func=lambda: nb.virtualization.virtual_machines.get(name=vm.name),
+        )
+
         if existing:
-            logging.debug("VM '%s' exists in Netbox, checking for updates.", vm.name)
             if needs_update(payload, existing):
-                logging.debug("VM '%s' needs update in Netbox.", vm.name)
-                updated = nb.virtualization.virtual_machines.update([{
-                    "id": existing.id,
-                    **payload
-                }])
-                if updated:
-                    logging.info("VM '%s' updated in Netbox.", vm.name)
-                    vm_record = updated[0]
-                else:
-                    logging.error("Failed to update VM '%s' in Netbox.", vm.name)
+                updated = _netbox_call(
+                    action=f"virtual_machines.update:{vm.name}",
+                    func=lambda: nb.virtualization.virtual_machines.update([{"id": existing.id, **payload}]),
+                )
+                if not updated:
+                    LOGGER.error("VM '%s' update returned empty response.", vm.name)
                     return None
-            else:
-                logging.debug("VM '%s' is up to date in Netbox.", vm.name)
-                vm_record = existing
-        else:
-            created = nb.virtualization.virtual_machines.create(payload)
-            if created:
-                logging.info("VM '%s' created in Netbox.", vm.name)
-                vm_record = created
-            else:
-                logging.error("Failed to create VM '%s' in Netbox.", vm.name)
-                return None
+                LOGGER.info("VM '%s' updated.", vm.name)
+                return updated[0]
 
-        return vm_record
+            LOGGER.debug("VM '%s' already up to date.", vm.name)
+            return existing
 
-    except (RequestException, ValueError) as e:
-        logging.error("Error creating or updating VM '%s' in Netbox: %s", vm.name, e)
+        created = _netbox_call(
+            action=f"virtual_machines.create:{vm.name}",
+            func=lambda: nb.virtualization.virtual_machines.create(payload),
+        )
+        if not created:
+            LOGGER.error("VM '%s' create returned empty response.", vm.name)
+            return None
+
+        LOGGER.info("VM '%s' created.", vm.name)
+        return created
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Failed to create/update VM '%s': %s", vm.name, exc)
         return None
 
-def create_or_update_vm_interfaces(vm_record, iface):
-    """
-    Create or update VM interfaces in Netbox.
-    Expects a VM record from Netbox and an Interface object as defined in kvm.py.
-    """
+
+def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
+    """Create a VM interface in NetBox if it does not already exist."""
     try:
-        existing_ifaces = nb.virtualization.interfaces.filter(virtual_machine_id=vm_record.id, name=iface.name)
+        existing_ifaces = _netbox_call(
+            action=f"interfaces.filter:{vm_record.name}:{iface.name}",
+            func=lambda: nb.virtualization.interfaces.filter(virtual_machine_id=vm_record.id, name=iface.name),
+        )
+        existing_ifaces = list(existing_ifaces)
         if existing_ifaces:
-            logging.info("Interface '%s' already exists for VM '%s'.", iface.name, vm_record.name)
-            return list(existing_ifaces)[0]
+            LOGGER.debug("Interface '%s' already exists for VM '%s'.", iface.name, vm_record.name)
+            return existing_ifaces[0]
 
         payload = {
             "virtual_machine": vm_record.id,
             "name": iface.name,
             "mac_address": iface.mac,
-            # "mtu": iface.mtu,
-            #"mode": "access",  # Example type, adjust as needed
         }
-        created_iface = nb.virtualization.interfaces.create(payload)
-        if created_iface:
-            logging.info("Interface '%s' created for VM '%s'.", iface.name, vm_record.name)
-        else:
-            logging.error("Failed to create interface '%s' for VM '%s'.", iface.name, vm_record.name)
+        created_iface = _netbox_call(
+            action=f"interfaces.create:{vm_record.name}:{iface.name}",
+            func=lambda: nb.virtualization.interfaces.create(payload),
+        )
+        if not created_iface:
+            LOGGER.error("Interface '%s' create returned empty response for VM '%s'.", iface.name, vm_record.name)
             return None
-        return created_iface
 
-    except (RequestException, ValueError) as e:
-        logging.error("Error creating interface '%s' for VM '%s': %s", iface.name, vm_record.name, e)
+        LOGGER.info("Interface '%s' created for VM '%s'.", iface.name, vm_record.name)
+        return created_iface
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Failed to create/update interface '%s' for VM '%s': %s", iface.name, vm_record.name, exc)
         return None
 
-def create_or_update_vm_disks(vm_record, disk):
-    """
-    Create or update VM disks in Netbox.
-    Expects a VM record from Netbox and a Disk object as defined in kvm.py.
-    """
+
+def create_or_update_vm_disks(vm_record: Any, disk: Any) -> Optional[Any]:
+    """Create or update VM disk information in NetBox."""
+    disk_name = os.path.basename(disk.file)
+
     try:
-        existing_disks = nb.virtualization.virtual_disks.filter(virtual_machine_id=vm_record.id, name=os.path.basename(disk.file))
+        existing_disks = _netbox_call(
+            action=f"virtual_disks.filter:{vm_record.name}:{disk_name}",
+            func=lambda: nb.virtualization.virtual_disks.filter(virtual_machine_id=vm_record.id, name=disk_name),
+        )
+        existing_disks = list(existing_disks)
+
         if existing_disks:
-            logging.info("Disk '%s' already exists for VM '%s'.", disk.file, vm_record.name)
-            if needs_update(disk, list(existing_disks)[0]):
-                logging.debug("Disk '%s' needs update in Netbox.", disk.file)
-                updated = nb.virtualization.virtual_disks.update([{
-                    "id": list(existing_disks)[0].id,
-                    "size": disk.size,
-                    "format": disk.format,
-                }])
-                if updated:
-                    logging.info("Disk '%s' updated for VM '%s'.", disk.file, vm_record.name)
-                else:
-                    logging.error("Failed to update disk '%s' for VM '%s'.", disk.file, vm_record.name)
-            return list(existing_disks)[0]
+            existing_disk = existing_disks[0]
+            payload = {
+                "name": disk_name,
+                "size": round(disk.size / 1024 / 1024),
+                "custom_fields": {"type": disk.format},
+            }
+            if needs_update(payload, existing_disk):
+                updated = _netbox_call(
+                    action=f"virtual_disks.update:{vm_record.name}:{disk_name}",
+                    func=lambda: nb.virtualization.virtual_disks.update(
+                        [{"id": existing_disk.id, "size": payload["size"], "custom_fields": payload["custom_fields"]}]
+                    ),
+                )
+                if not updated:
+                    LOGGER.error("Disk '%s' update returned empty response for VM '%s'.", disk_name, vm_record.name)
+                    return None
+                LOGGER.info("Disk '%s' updated for VM '%s'.", disk_name, vm_record.name)
+            else:
+                LOGGER.debug("Disk '%s' already up to date for VM '%s'.", disk_name, vm_record.name)
+            return existing_disk
 
         payload = {
             "virtual_machine": vm_record.id,
-            "name": os.path.basename(disk.file),
-            "size": round(disk.size/1024/1024), 
-            "custom_fields": {"type": disk.format,},
+            "name": disk_name,
+            "size": round(disk.size / 1024 / 1024),
+            "custom_fields": {"type": disk.format},
         }
-        created_disk = nb.virtualization.virtual_disks.create(payload)
-        if created_disk:
-            logging.info("Disk '%s' created for VM '%s'.", disk.file, vm_record.name)
-        else:
-            logging.error("Failed to create disk '%s' for VM '%s'.", disk.file, vm_record.name)
+        created_disk = _netbox_call(
+            action=f"virtual_disks.create:{vm_record.name}:{disk_name}",
+            func=lambda: nb.virtualization.virtual_disks.create(payload),
+        )
+        if not created_disk:
+            LOGGER.error("Disk '%s' create returned empty response for VM '%s'.", disk_name, vm_record.name)
             return None
-        return created_disk
 
-    except (RequestException, ValueError) as e:
-        logging.error("Error creating disk '%s' for VM '%s': %s", disk.file, vm_record.name, e)
+        LOGGER.info("Disk '%s' created for VM '%s'.", disk_name, vm_record.name)
+        return created_disk
+    except (NetBoxUnavailableError, RequestException, ValueError) as exc:
+        LOGGER.error("Failed to create/update disk '%s' for VM '%s': %s", disk_name, vm_record.name, exc)
         return None
 
-def needs_update(local_obj, netbox_obj):
-    """
-    Compare only the fields that are present in both local_obj and netbox_obj.
-    Returns True if any common field differs, False otherwise.
-    """
-    # Get all attributes of the local object (excluding private and methods)
-    local_fields = local_obj.keys() if isinstance(local_obj, dict) else [attr for attr in dir(local_obj) if not attr.startswith("_") and not callable(getattr(local_obj, attr))]
-    # Determine which fields exist in both objects
-    if isinstance(netbox_obj, dict):
-        netbox_fields = netbox_obj.keys()
-    else:
-        netbox_fields = [attr for attr in dir(netbox_obj) if not attr.startswith("_") and not callable(getattr(netbox_obj, attr))]
-    common_fields = set(local_fields) & set(netbox_fields)
-    for field in common_fields:
-        local_val = local_obj.get(field, None) if isinstance(local_obj, dict) else getattr(local_obj, field, None)
+
+def needs_update(local_obj: Any, netbox_obj: Any) -> bool:
+    """Return True when comparable fields differ between local and NetBox objects."""
+    local_fields = (
+        local_obj.keys()
+        if isinstance(local_obj, dict)
+        else [attr for attr in dir(local_obj) if not attr.startswith("_") and not callable(getattr(local_obj, attr))]
+    )
+    netbox_fields = (
+        netbox_obj.keys()
+        if isinstance(netbox_obj, dict)
+        else [attr for attr in dir(netbox_obj) if not attr.startswith("_") and not callable(getattr(netbox_obj, attr))]
+    )
+
+    for field in set(local_fields) & set(netbox_fields):
+        local_val = local_obj.get(field) if isinstance(local_obj, dict) else getattr(local_obj, field, None)
+        netbox_val = netbox_obj.get(field) if isinstance(netbox_obj, dict) else getattr(netbox_obj, field, None)
+
         if isinstance(local_val, dict):
-            local_val = local_val.get(list(local_val.keys())[0], None) if local_val else None
-        netbox_val = getattr(netbox_obj, field, None) if not isinstance(netbox_obj, dict) else netbox_obj.get(field, None)
+            local_val = next(iter(local_val.values()), None)
+        if isinstance(netbox_val, dict):
+            netbox_val = next(iter(netbox_val.values()), None)
+
         if str(local_val).lower() != str(netbox_val).lower():
             return True
     return False

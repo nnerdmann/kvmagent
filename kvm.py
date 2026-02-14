@@ -1,21 +1,32 @@
+import logging
+
 import libvirt
 import lxml.etree as ET
-import logging
-import socket
+
+LOGGER = logging.getLogger(__name__)
+
 
 class VMInterface:
+    """Lightweight representation of a VM network interface."""
+
     def __init__(self, name, ip, mac):
         self.name = name
         self.ip = ip
         self.mac = mac
 
+
 class VMDisk:
+    """Lightweight representation of a VM disk."""
+
     def __init__(self, file, format, size):
         self.file = file
         self.format = format
         self.size = size
 
+
 class VM:
+    """Aggregated VM model extracted from libvirt."""
+
     def __init__(self):
         self.name = ""
         self.vcpus = 0
@@ -28,7 +39,10 @@ class VM:
         self.type = ""
         self.interfaces = []
 
+
 class KVMHost:
+    """Wrapper around libvirt connection and VM inventory extraction."""
+
     def __init__(self, addr=""):
         self.addr = addr
         self.conn = None
@@ -36,39 +50,46 @@ class KVMHost:
     def get_type(self):
         return "KVM"
 
-    def get_libvirt(self):
-        def is_connected(conn):
-            try:
-                # Try a simple call to check connection
-                conn.getLibVersion()
-                return True
-            except libvirt.libvirtError:
-                return False
+    def _is_connected(self, conn) -> bool:
+        """Check if an existing libvirt connection is still healthy."""
+        try:
+            conn.getLibVersion()
+            return True
+        except libvirt.libvirtError:
+            return False
 
-        if self.conn and is_connected(self.conn):
+    def get_libvirt(self):
+        """Return active libvirt connection, recreating it if needed."""
+        if self.conn and self._is_connected(self.conn):
             return self.conn
 
         uri = f"qemu+tcp://{self.addr}/system" if self.addr else "qemu:///system"
         try:
+            LOGGER.info("Opening libvirt connection to %s", uri)
             self.conn = libvirt.open(uri)
-            # libvirt.registerErrorHandler(None, None)
-        except libvirt.libvirtError as e:
+        except libvirt.libvirtError as exc:
             self.conn = None
-            raise ConnectionError(f"Unable to connect to libvirt at {uri}: {e}") from e
+            raise ConnectionError(f"Unable to connect to libvirt at {uri}: {exc}") from exc
 
         return self.conn
 
     def get_vms(self):
+        """Collect VM metadata from all domains visible on the libvirt host."""
         conn = self.get_libvirt()
-        domains = conn.listAllDomains()
+        try:
+            domains = conn.listAllDomains()
+        except libvirt.libvirtError as exc:
+            raise RuntimeError(f"Unable to list domains from libvirt host '{self.addr}': {exc}") from exc
+
         vms = []
         for dom in domains:
             vm = VM()
             vm.name = dom.name()
             vm.serial = dom.UUIDString()
             info = dom.info()
-            vm.memory = int(info[1]) // 1024  # Convert KB to MB
+            vm.memory = int(info[1]) // 1024
             vm.vcpus = float(info[3])
+
             state_map = {
                 libvirt.VIR_DOMAIN_NOSTATE: "Failed",
                 libvirt.VIR_DOMAIN_RUNNING: "Active",
@@ -77,9 +98,10 @@ class KVMHost:
                 libvirt.VIR_DOMAIN_SHUTDOWN: "Offline",
                 libvirt.VIR_DOMAIN_SHUTOFF: "Offline",
                 libvirt.VIR_DOMAIN_CRASHED: "Failed",
-                libvirt.VIR_DOMAIN_PMSUSPENDED: "Failed"
+                libvirt.VIR_DOMAIN_PMSUSPENDED: "Failed",
             }
             vm.status = state_map.get(info[0], "Unknown")
+
             try:
                 vm.snapshot = dom.snapshotNum()
             except libvirt.libvirtError:
@@ -90,54 +112,87 @@ class KVMHost:
                 xml = dom.XMLDesc(0)
                 vm.xml = xml
                 root = ET.fromstring(xml)
-                # OS type detection
-                os_type = root.findtext('./os/type')
+
+                # OS type and workload hints from domain XML.
+                os_type = root.findtext("./os/type")
                 if os_type and "windows" in os_type.lower():
                     vm.type = "Windows VM"
-                # Disks
+
                 for disk in root.findall("./devices/disk[@device='disk']"):
                     driver = disk.find("driver")
                     source = disk.find("source")
-                    if driver is not None and source is not None:
-                        fmt = driver.get("type", "")
-                        file_attr = source.get("file")
-                        if file_attr:
-                            file_path = file_attr
+                    if driver is None or source is None:
+                        continue
+
+                    disk_format = driver.get("type", "")
+                    file_path = source.get("file")
+                    if not file_path:
+                        pool = source.get("pool")
+                        volume = source.get("volume")
+                        if pool and volume:
+                            file_path = f"{pool}/{volume}"
                         else:
-                            pool = source.get("pool")
-                            volume = source.get("volume")
-                            if pool and volume:
-                                file_path = f"{pool}/{volume}"
-                            else:
-                                continue
-                        try:
-                            blkinfo = dom.blockInfo(file_path)
-                            size = int(blkinfo[1])
-                        except libvirt.libvirtError as e:
-                            if e.err[0] == libvirt.VIR_ERR_SYSTEM_ERROR:
-                                logging.warning("Failed to access disk '%s' for VM '%s': %s. Setting size to 0.", file_path, vm.name, e)
-                                size = 0
-                        vm.disks.append(VMDisk(file_path, fmt, size))
-                # Interfaces
+                            continue
+
+                    try:
+                        blkinfo = dom.blockInfo(file_path)
+                        size = int(blkinfo[1])
+                    except libvirt.libvirtError as exc:
+                        LOGGER.warning(
+                            "Unable to read disk '%s' info for VM '%s': %s; using size=0.",
+                            file_path,
+                            vm.name,
+                            exc,
+                        )
+                        size = 0
+
+                    vm.disks.append(VMDisk(file_path, disk_format, size))
+
                 if vm.status == "Active":
-                    blacklist = ["lo", "dummy", "flannel", "veth", "nodelocaldns", "kube", "cali", "tun", "virbr", "cni", "docker","br-"]
+                    blacklist = [
+                        "lo",
+                        "dummy",
+                        "flannel",
+                        "veth",
+                        "nodelocaldns",
+                        "kube",
+                        "cali",
+                        "tun",
+                        "virbr",
+                        "cni",
+                        "docker",
+                        "br-",
+                    ]
                     try:
                         ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0)
                         for name, iface in ifaces.items():
-                            if any(b in name for b in blacklist):
+                            if any(marker in name for marker in blacklist):
                                 continue
-                            mac = iface['hwaddr'] if 'hwaddr' in iface else ""
+
+                            mac = iface.get("hwaddr", "")
                             ip = ""
-                            if iface.get('addrs') is not None:
-                                for addr in iface.get('addrs', []):
-                                    if addr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV4 and not addr['addr'].startswith("127.") and not addr['addr'].startswith("169.254"):
-                                        ip = addr['addr']
-                                        break
-                                    vm.interfaces.append(VMInterface(name, ip, mac))
-                    except libvirt.libvirtError as e:
-                        if e.err[0] == libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED:
-                            logging.warning("Guest agent not installed or not running; cannot retrieve IP addresses.")
-            except Exception as e:
-                logging.warning("Error parsing domain XML: %s", e)
+                            for addr in iface.get("addrs", []):
+                                if (
+                                    addr.get("type") == libvirt.VIR_IP_ADDR_TYPE_IPV4
+                                    and not addr.get("addr", "").startswith("127.")
+                                    and not addr.get("addr", "").startswith("169.254")
+                                ):
+                                    ip = addr["addr"]
+                                    break
+
+                            vm.interfaces.append(VMInterface(name, ip, mac))
+                    except libvirt.libvirtError as exc:
+                        LOGGER.warning(
+                            "Unable to read interface addresses for VM '%s' (guest agent may be missing): %s",
+                            vm.name,
+                            exc,
+                        )
+            except ET.XMLSyntaxError as exc:
+                LOGGER.warning("Unable to parse XML for VM '%s': %s", vm.name, exc)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Unexpected VM parsing error for '%s': %s", vm.name, exc)
+
             vms.append(vm)
+
+        LOGGER.info("Collected inventory for %d VM(s).", len(vms))
         return vms

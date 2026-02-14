@@ -1,2 +1,4 @@
 libvirt-python
 lxml
+pynetbox
+requests
