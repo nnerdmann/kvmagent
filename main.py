@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import time
 
 from kvm import KVMHost
@@ -68,7 +69,7 @@ def main() -> None:
         interval = CHECK_INTERVAL
 
     host = KVMHost(addr=KVM_ADDR)
-    cluster_name = KVM_ADDR or "localhost"
+    cluster_name = KVM_ADDR or socket.getfqdn()
     cluster = create_or_update_cluster_in_netbox(cluster_name)
 
     if cluster is None:
