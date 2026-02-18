@@ -221,28 +221,107 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
             func=lambda: nb.virtualization.interfaces.filter(virtual_machine_id=vm_record.id, name=iface.name),
         )
         existing_ifaces = list(existing_ifaces)
+        iface_obj = existing_ifaces[0] if existing_ifaces else None
         if existing_ifaces:
             LOGGER.debug("Interface '%s' already exists for VM '%s'.", iface.name, vm_record.name)
-            return existing_ifaces[0]
+        else:
+            payload = {
+                "virtual_machine": vm_record.id,
+                "name": iface.name,
+            }
+            iface_obj = _netbox_call(
+                action=f"interfaces.create:{vm_record.name}:{iface.name}",
+                func=lambda: nb.virtualization.interfaces.create(payload),
+            )
+            if not iface_obj:
+                LOGGER.error("Interface '%s' create returned empty response for VM '%s'.", iface.name, vm_record.name)
+                return
+            else:
+                LOGGER.info("Interface '%s' created for VM '%s'.", iface.name, vm_record.name)
 
-        payload = {
-            "virtual_machine": vm_record.id,
-            "name": iface.name,
-            "mac_address": iface.mac,
-        }
-        created_iface = _netbox_call(
-            action=f"interfaces.create:{vm_record.name}:{iface.name}",
-            func=lambda: nb.virtualization.interfaces.create(payload),
-        )
-        if not created_iface:
-            LOGGER.error("Interface '%s' create returned empty response for VM '%s'.", iface.name, vm_record.name)
-            return None
-
-        LOGGER.info("Interface '%s' created for VM '%s'.", iface.name, vm_record.name)
-        return created_iface
+        existing_mac = _netbox_call(
+            action=f"mac_addresses.filter:{vm_record.name}:{iface.mac}",
+            func=lambda: nb.dcim.mac_addresses.filter(mac_address=iface.mac),)
+        existing_mac = list(existing_mac)
+        
+        mac_obj = existing_mac[0] if existing_mac else None
+        if existing_mac:
+            LOGGER.debug("MAC address '%s' already exists in NetBox; skipping creation.", iface.mac)
+        else: 
+            mac_payload = {
+                "mac_address": iface.mac,
+                "assigned_object_type": "virtualization.vminterface",
+                "assigned_object_id": iface_obj.id,
+            }
+            mac_obj = _netbox_call(
+                action=f"mac_addresses.create:{vm_record.name}:{iface.mac}",
+                func=lambda: nb.dcim.mac_addresses.create(mac_payload),
+            )
+            if not mac_obj:
+                LOGGER.error("MAC address '%s' create returned empty response for VM '%s'.", iface.mac, vm_record.name)
+            else:
+                LOGGER.info("MAC address '%s' created for VM '%s'.", iface.mac, vm_record.name)
+         
+        if mac_obj.assigned_object_id != iface_obj.id or mac_obj.assigned_object_type != "virtualization.vminterface":
+            mac_obj.assigned_object_id = iface_obj.id
+            mac_obj.assigned_object_type = "virtualization.vminterface"
+            _netbox_call(
+                action=f"mac_addresses.update:{vm_record.name}:{mac_obj.mac_address}",
+                func=mac_obj.save,
+            )
+            LOGGER.info("Interface '%s' for VM '%s' updated with MAC address '%s'.", iface.name, vm_record.name, iface.mac)
+   
+        
+        if iface_obj.mac_address is None or iface_obj.mac_address != mac_obj.mac_address:
+           
+            _netbox_call(
+                action=f"interfaces.update:{vm_record.name}:{iface_obj.name}",
+                func=lambda: nb.virtualization.interfaces.update([{"id": iface_obj.id, "primary_mac_address": mac_obj.id}]),
+            )
+            LOGGER.info("Interface '%s' for VM '%s' set as primary with MAC address '%s'.", iface.name, vm_record.name, iface.mac)
+        
+        existing_ips = _netbox_call(
+            action=f"ip_addresses.filter:{vm_record.name}:{iface.ip}",
+            func=lambda: nb.ipam.ip_addresses.filter(address=iface.ip),)
+        existing_ips = list(existing_ips)
+        ip_obj = existing_ips[0] if existing_ips else None
+        if existing_ips:
+            LOGGER.debug("IP address '%s' already exists in NetBox; skipping creation.", iface.ip)
+        else:
+            ip_payload = {
+                "address": iface.ip,
+                "assigned_object_type": "virtualization.vminterface",
+                "assigned_object_id": iface_obj.id,
+            }
+            ip_obj = _netbox_call(
+                action=f"ip_addresses.create:{vm_record.name}:{iface.ip}",
+                func=lambda: nb.ipam.ip_addresses.create(ip_payload),
+            )
+            if not ip_obj:
+                LOGGER.error("IP address '%s' create returned empty response for VM '%s'.", iface.ip, vm_record.name)
+            else:
+                LOGGER.info("IP address '%s' created for VM '%s'.", iface.ip, vm_record.name)
+        
+        if ip_obj.assigned_object_id != iface_obj.id or ip_obj.assigned_object_type != "virtualization.vminterface":
+            ip_obj.assigned_object_id = iface_obj.id
+            ip_obj.assigned_object_type = "virtualization.vminterface"
+            _netbox_call(
+                action=f"ip_addresses.update:{vm_record.name}:{ip_obj.address}",
+                func=ip_obj.save,
+            )
+            LOGGER.info("Interface '%s' for VM '%s' updated with IP address '%s'.", iface.name, vm_record.name, iface.ip)
+        
+        if vm_record.primary_ip is None:
+            _netbox_call(
+                action=f"virtual_machines.update_primary_ip:{vm_record.name}",
+                func=lambda: nb.virtualization.virtual_machines.update([{"id": vm_record.id, "primary_ip4": ip_obj.id}]),
+            )
+            LOGGER.info("VM '%s' primary IP set to '%s'.", vm_record.name, iface.ip)
+        
+        return
     except (NetBoxUnavailableError, RequestException, ValueError) as exc:
         LOGGER.error("Failed to create/update interface '%s' for VM '%s': %s", iface.name, vm_record.name, exc)
-        return None
+        return
 
 
 def create_or_update_vm_disks(vm_record: Any, disk: Any) -> Optional[Any]:
