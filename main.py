@@ -28,7 +28,7 @@ def configure_logging() -> None:
 def exec_check(host: KVMHost, cluster) -> None:
     """Synchronize all VMs, interfaces, and disks from KVM host to NetBox."""
     vms = host.get_vms()
-    logging.info("Discovered %d VM(s) from libvirt host '%s'.", len(vms), host.addr or "localhost")
+    logging.info("Discovered %d VM(s) from libvirt host '%s'.", len(vms), cluster.name)
 
     for vm in vms:
         logging.debug("Processing VM '%s'.", vm.name)
@@ -69,7 +69,7 @@ def main() -> None:
         interval = CHECK_INTERVAL
 
     host = KVMHost(addr=KVM_ADDR)
-    cluster_name = KVM_ADDR or socket.getfqdn()
+    cluster_name = KVM_ADDR or socket.gethostname()
     cluster = create_or_update_cluster_in_netbox(cluster_name)
 
     if cluster is None:
