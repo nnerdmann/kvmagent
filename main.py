@@ -16,7 +16,6 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 RUN_ONCE = os.getenv("RUN_ONCE", "true").lower() in {"1", "true", "yes", "on"}
 KVM_ADDR = os.getenv("KVM_ADDR", "")
 
-
 def configure_logging() -> None:
     """Configure root logging for the agent with a readable format."""
     logging.basicConfig(

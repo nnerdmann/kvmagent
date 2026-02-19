@@ -3,6 +3,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
+from netaddr import IPAddress, IPNetwork
 from pynetbox import api
 from requests import RequestException
 
@@ -13,6 +14,7 @@ NETBOX_SITE = os.getenv("NETBOX_SITE", "default")
 NETBOX_CLUSTER_TYPE = os.getenv("NETBOX_CLUSTER_TYPE", "KVM")
 NETBOX_API_RETRIES = int(os.getenv("NETBOX_API_RETRIES", "3"))
 NETBOX_RETRY_BACKOFF = float(os.getenv("NETBOX_RETRY_BACKOFF", "1.5"))
+PRIMARY_IPV4_SUBNET = os.getenv("NETBOX_PRIMARY_IPV4_SUBNET", "")
 
 LOGGER = logging.getLogger(__name__)
 nb = api(NETBOX_URL, token=NETBOX_TOKEN) if NETBOX_URL else None
@@ -311,7 +313,7 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
             )
             LOGGER.info("Interface '%s' for VM '%s' updated with IP address '%s'.", iface.name, vm_record.name, iface.ip)
         
-        if vm_record.primary_ip is None:
+        if vm_record.primary_ip is None or IPAddress(ip_obj.address.split('/')[0]) in IPNetwork(PRIMARY_IPV4_SUBNET):
             _netbox_call(
                 action=f"virtual_machines.update_primary_ip:{vm_record.name}",
                 func=lambda: nb.virtualization.virtual_machines.update([{"id": vm_record.id, "primary_ip4": ip_obj.id}]),
