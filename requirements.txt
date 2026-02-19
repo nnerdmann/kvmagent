@@ -1,4 +1,5 @@
-libvirt-python
-lxml
-pynetbox
-requests
+libvirt-python~=12.0
+lxml~=6.0
+pynetbox~=7.6
+requests~=2.32
+netaddr~=1.3
