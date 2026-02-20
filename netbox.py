@@ -19,6 +19,7 @@ NETBOX_RETRY_BACKOFF = float(os.getenv("NETBOX_RETRY_BACKOFF", "1.5"))
 NETBOX_CA_CERTS_FILE = os.getenv("NETBOX_CA_CERTS_FILE")
 NETBOX_SSL_VERIFY = os.getenv("NETBOX_SSL_VERIFY", "true").lower() in {"1", "true", "yes", "on"}
 PRIMARY_IPV4_SUBNET = os.getenv("NETBOX_PRIMARY_IPV4_SUBNET", "")
+PRIMARY_DOMAIN = os.getenv("NETBOX_PRIMARY_DOMAIN", "")
 
 LOGGER = logging.getLogger(__name__)
 nb = api(NETBOX_URL, token=NETBOX_TOKEN) if NETBOX_URL else None
@@ -179,6 +180,7 @@ def _assign_device_to_cluster(name: str, cluster: Any) -> None:
 
 def create_or_update_vm_in_netbox(vm: Any, cluster: Any) -> Optional[Any]:
     """Create or update a VM in NetBox."""
+    
     payload = {
         "name": vm.name,
         "status": vm.status.lower(),
@@ -329,7 +331,14 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
                 action=f"virtual_machines.update_primary_ip:{vm_record.name}",
                 func=lambda: nb.virtualization.virtual_machines.update([{"id": vm_record.id, "primary_ip4": ip_obj.id}]),
             )
+        
+        if PRIMARY_IPV4_SUBNET != "" and IPAddress(ip_obj.address.split('/')[0]) in IPNetwork(PRIMARY_IPV4_SUBNET) and PRIMARY_DOMAIN != "" and ip_obj.dns_name != f"{vm_record.name}.{PRIMARY_DOMAIN}":
             LOGGER.info("VM '%s' primary IP set to '%s'.", vm_record.name, iface.ip)
+            _netbox_call(
+                action=f"ip_addresses.dns_name.update:{vm_record.name}:{ip_obj.address}",
+                func=lambda: nb.ipam.ip_addresses.update([{"id": ip_obj.id, "dns_name": f"{vm_record.name}.{PRIMARY_DOMAIN}"}]),
+            )
+            LOGGER.info("IP address '%s' DNS name set to '%s'.", ip_obj.address, f"{vm_record.name}.{PRIMARY_DOMAIN}")
         
         return
     except (NetBoxUnavailableError, RequestException, ValueError) as exc:
