@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 from typing import Any, Callable, Optional
 
@@ -190,7 +191,10 @@ def create_or_update_vm_in_netbox(vm: Any, cluster: Any) -> Optional[Any]:
         "site": {"name": NETBOX_SITE},
         "tenant": {"name": NETBOX_TENANT},
         "cluster": {"name": cluster.name},
+        
     }
+    if vm.platform:
+        payload["platform"] = {"name": vm.platform}
 
     try:
         existing = _netbox_call(
@@ -244,6 +248,23 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
                 "virtual_machine": vm_record.id,
                 "name": iface.name,
             }
+            match = re.match(r"^(.+)\.(\d+)$", iface.name)
+            if match is not None:
+                parent_name, vlan_id = match.groups()
+                parent_iface = _netbox_call(
+                    action=f"interfaces.get:{vm_record.name}:{parent_name}",
+                    func=lambda: nb.virtualization.interfaces.filter(virtual_machine_id=vm_record.id, name=parent_name),
+                )
+                parent_iface = list(parent_iface)
+                if parent_iface:
+                    payload["parent"] = parent_iface[0].id
+                else:
+                    LOGGER.warning("Parent interface '%s' not found for VM '%s'; skipping VLAN interface creation.", parent_name, vm_record.name)
+                    return
+                payload["type"] = "virtual"
+                payload["mode"] = "access"
+                payload["untagged_vlan"] = {"vid": int(vlan_id)}
+            
             iface_obj = _netbox_call(
                 action=f"interfaces.create:{vm_record.name}:{iface.name}",
                 func=lambda: nb.virtualization.interfaces.create(payload),
@@ -259,10 +280,13 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
             func=lambda: nb.dcim.mac_addresses.filter(mac_address=iface.mac),)
         existing_mac = list(existing_mac)
         
-        mac_obj = existing_mac[0] if existing_mac else None
-        if existing_mac:
-            LOGGER.debug("MAC address '%s' already exists in NetBox; skipping creation.", iface.mac)
-        else: 
+        mac_obj = None        
+        for mac in existing_mac:
+            if mac.assigned_object_id == iface_obj.id and mac.assigned_object_type == "virtualization.vminterface":
+                LOGGER.debug("MAC address '%s' already assigned to interface '%s' for VM '%s'.", iface.mac, iface.name, vm_record.name)
+                mac_obj = mac
+                break
+        if mac_obj is None:
             mac_payload = {
                 "mac_address": iface.mac,
                 "assigned_object_type": "virtualization.vminterface",
@@ -295,6 +319,9 @@ def create_or_update_vm_interfaces(vm_record: Any, iface: Any) -> Optional[Any]:
             )
             LOGGER.info("Interface '%s' for VM '%s' set as primary with MAC address '%s'.", iface.name, vm_record.name, iface.mac)
         
+        if iface.ip is None:
+            LOGGER.debug("Interface '%s' for VM '%s' has no IP address", iface.name, vm_record.name)
+            return
         existing_ips = _netbox_call(
             action=f"ip_addresses.filter:{vm_record.name}:{iface.ip}",
             func=lambda: nb.ipam.ip_addresses.filter(address=iface.ip),)

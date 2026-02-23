@@ -1,4 +1,7 @@
 import logging
+import json
+import base64
+import time
 
 import libvirt
 import lxml.etree as ET
@@ -38,6 +41,7 @@ class VM:
         self.xml = ""
         self.type = ""
         self.interfaces = []
+        self.platform = ""
 
 
 class KVMHost:
@@ -102,6 +106,9 @@ class KVMHost:
             }
             vm.status = state_map.get(info[0], "Unknown")
 
+            if vm.status == "Active":
+                vm.platform = self.detect_platform_string(dom)
+                
             try:
                 vm.snapshot = dom.snapshotNum()
             except libvirt.libvirtError:
@@ -170,15 +177,16 @@ class KVMHost:
                                 continue
 
                             mac = iface.get("hwaddr", "")
-                            ip = ""
-                            for addr in iface.get("addrs", []):
-                                if (
-                                    addr.get("type") == libvirt.VIR_IP_ADDR_TYPE_IPV4
-                                    and not addr.get("addr", "").startswith("127.")
-                                    and not addr.get("addr", "").startswith("169.254")
-                                ):
-                                    ip = addr["addr"]
-                                    break
+                            ip = None
+                            if iface["addrs"] is not None:
+                                for addr in iface["addrs"]:
+                                    if (
+                                        addr.get("type") == libvirt.VIR_IP_ADDR_TYPE_IPV4
+                                        and not addr.get("addr", "").startswith("127.")
+                                        and not addr.get("addr", "").startswith("169.254")
+                                    ):
+                                        ip = addr["addr"]+"/"+str(addr["prefix"])
+                                        break                           
 
                             vm.interfaces.append(VMInterface(name, ip, mac))
                     except libvirt.libvirtError as exc:
@@ -196,3 +204,54 @@ class KVMHost:
 
         LOGGER.info("Collected inventory for %d VM(s).", len(vms))
         return vms
+
+
+
+    # def _qga(self, cmd):
+    #     return json.loads(self.dom.qemuAgentCommand(
+    #         json.dumps(cmd),
+    #         0,
+    #         0
+    #     ))
+
+    # def _guest_exec(self, domain, path, args=None):
+    #     cmd = {
+    #         "execute": "guest-exec",
+    #         "arguments": {
+    #             "path": path,
+    #             "capture-output": True
+    #         }
+    #     }
+
+    #     if args:
+    #         cmd["arguments"]["arg"] = args
+
+    #     self.dom = domain
+    #     result = self._qga(cmd)
+    #     pid = result["return"]["pid"]
+
+    #     for _ in range(10):
+    #         status = self._qga({
+    #             "execute": "guest-exec-status",
+    #             "arguments": {"pid": pid}
+    #         })["return"]
+
+    #         if status.get("exited"):
+    #             exitcode = status.get("exitcode", -1)
+    #             out = status.get("out-data", "")
+    #             stdout = base64.b64decode(out).decode() if out else ""
+    #             return exitcode, stdout.strip()
+
+    #         time.sleep(0.3)
+
+    #     return -1, ""
+
+    def detect_platform_string(self, domain):
+        """
+        Returns exact platform string from inside the VM.
+        """
+        
+        os_info = domain.guestInfo(2)  # Trigger guest agent update
+        if os_info and "os.pretty-name" in os_info:
+            return os_info["os.pretty-name"].replace('(', '').replace(')', '')  # Remove any surrounding quotes
+        return ""
