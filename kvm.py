@@ -157,6 +157,7 @@ class KVMHost:
 
                 if vm.status == "Active":
                     blacklist = [
+                        "Loopback"
                         "lo",
                         "dummy",
                         "flannel",
