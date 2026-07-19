@@ -23,7 +23,7 @@ PRIMARY_IPV4_SUBNET = os.getenv("NETBOX_PRIMARY_IPV4_SUBNET", "")
 PRIMARY_DOMAIN = os.getenv("NETBOX_PRIMARY_DOMAIN", "")
 
 LOGGER = logging.getLogger(__name__)
-nb = api(NETBOX_URL, token=NETBOX_TOKEN) if NETBOX_URL else None
+nb = api(NETBOX_URL, token=NETBOX_TOKEN,) if NETBOX_URL else None
 if NETBOX_CA_CERTS_FILE is not None:
     session = requests.Session()
     session.verify = NETBOX_CA_CERTS_FILE
@@ -178,6 +178,14 @@ def _assign_device_to_cluster(name: str, cluster: Any) -> None:
     except (NetBoxUnavailableError, RequestException, ValueError) as exc:
         LOGGER.error("Unable to assign device '%s' to cluster '%s': %s", name, cluster.name, exc)
 
+def _taglist_to_dict(taglist: list[str]):
+    """Convert a list of tag names to a dictionary suitable for NetBox API."""
+    output = []
+    for tag in taglist:
+        if not isinstance(tag, str):
+            raise ValueError(f"Tag '{tag}' is not a string.")
+        output.append({"name": tag})
+    return output
 
 def create_or_update_vm_in_netbox(vm: Any, cluster: Any) -> Optional[Any]:
     """Create or update a VM in NetBox."""
@@ -188,6 +196,7 @@ def create_or_update_vm_in_netbox(vm: Any, cluster: Any) -> Optional[Any]:
         "vcpus": vm.vcpus,
         "memory": vm.memory,
         "serial": vm.serial,
+        "tags": _taglist_to_dict(vm.tags),
         "site": {"name": NETBOX_SITE},
         "tenant": {"name": NETBOX_TENANT},
         "cluster": {"name": cluster.name},

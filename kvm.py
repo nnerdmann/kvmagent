@@ -1,6 +1,7 @@
 import logging
 import json
 import base64
+import os
 import time
 
 import libvirt
@@ -42,6 +43,7 @@ class VM:
         self.type = ""
         self.interfaces = []
         self.platform = ""
+        self.tags = []
 
 
 class KVMHost:
@@ -53,6 +55,9 @@ class KVMHost:
 
     def get_type(self):
         return "KVM"
+
+    def get_tags(self):
+        return   os.getenv("NETBOX_KVMAGENT_TAGLIST", "").split(",")
 
     def _is_connected(self, conn) -> bool:
         """Check if an existing libvirt connection is still healthy."""
@@ -90,6 +95,7 @@ class KVMHost:
             vm = VM()
             vm.name = dom.name()
             vm.serial = dom.UUIDString()
+            vm.tags = self.get_tags()
             info = dom.info()
             vm.memory = int(info[1]) // 1024
             vm.vcpus = float(info[3])
@@ -205,47 +211,6 @@ class KVMHost:
 
         LOGGER.info("Collected inventory for %d VM(s).", len(vms))
         return vms
-
-
-
-    # def _qga(self, cmd):
-    #     return json.loads(self.dom.qemuAgentCommand(
-    #         json.dumps(cmd),
-    #         0,
-    #         0
-    #     ))
-
-    # def _guest_exec(self, domain, path, args=None):
-    #     cmd = {
-    #         "execute": "guest-exec",
-    #         "arguments": {
-    #             "path": path,
-    #             "capture-output": True
-    #         }
-    #     }
-
-    #     if args:
-    #         cmd["arguments"]["arg"] = args
-
-    #     self.dom = domain
-    #     result = self._qga(cmd)
-    #     pid = result["return"]["pid"]
-
-    #     for _ in range(10):
-    #         status = self._qga({
-    #             "execute": "guest-exec-status",
-    #             "arguments": {"pid": pid}
-    #         })["return"]
-
-    #         if status.get("exited"):
-    #             exitcode = status.get("exitcode", -1)
-    #             out = status.get("out-data", "")
-    #             stdout = base64.b64decode(out).decode() if out else ""
-    #             return exitcode, stdout.strip()
-
-    #         time.sleep(0.3)
-
-    #     return -1, ""
 
     def detect_platform_string(self, domain):
         """
