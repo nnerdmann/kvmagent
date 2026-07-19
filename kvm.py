@@ -57,7 +57,7 @@ class KVMHost:
         return "KVM"
 
     def get_tags(self):
-        return   os.getenv("NETBOX_KVMAGENT_TAGLIST", "").split(",")
+        return   os.getenv("NETBOX_TAGLIST", "").split(",")
 
     def _is_connected(self, conn) -> bool:
         """Check if an existing libvirt connection is still healthy."""
